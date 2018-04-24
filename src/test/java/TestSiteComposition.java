@@ -27,4 +27,28 @@ public class TestSiteComposition {
         Assertions.assertEquals(2, sitecomp.sites.size());
     }
 
+    @Test
+    public void testIncome() {
+        Site site1 = new Site(1, 1, 2, 3);
+        site1.owner = 0;
+        site1.param1 = 3;
+
+        Site site2 = new Site(2, 2, 2, 3);
+        site2.owner = 0;
+        site2.param1 = 1;
+
+        Site site3 = new Site(3, 2, 3 , 3);
+        site3.owner = 1;
+        site3.param1 = 5;
+
+        Sites sites = new Sites();
+        sites.put(site1.siteId, site1);
+        sites.put(site2.siteId, site2);
+        sites.put(site3.siteId, site3);
+
+        SiteComposition sitecomp = new SiteComposition(sites, Site::isMine);
+
+        Assertions.assertEquals(4, sitecomp.income());
+    }
+
 }

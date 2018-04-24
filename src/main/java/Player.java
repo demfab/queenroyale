@@ -16,11 +16,20 @@ class Player {
     public static final int ARCHER_COST = 100;
     public static final int GIANT_COST = 140;
     public static final int KNIGHT_COST = 80;
-    public static final int KNIGHT_THRESOLD = 16;
+    public static final int KNIGHT_THRESOLD = 8;
+    public static final int KNIGHT_CLOSE_THRESOLD = 3;
     public static final int ARCHER_THRESOLD = 2;
     public static final int GIANT_THRESOLD = 1;
     public static final int MINE_UPGRADE_THRESOLD = 3;
-    static final int TOWER_THRESOLD = 5;
+    static final int QUEEN_AGRESSION_TRIGGER = 160;
+    static final int TOWER_THRESOLD = 4;
+    static final int TOWER_MAX_HP = 800;
+    static final int QUEEN_TOWER_REPAIR_HP = 100;
+
+    public static final int DISTANCE_THRESOLD = 50;
+    static Located origin = null;
+
+
 
     private void run() {
         Scanner in = new Scanner(System.in);
@@ -84,27 +93,30 @@ class Player {
 
 class Strategy {
 
-
-
     Commands chooseCommandsToInvoke(int gold, int turnNumber, Site touchingSite, Sites sites, Units units) {
         Commands commands = new Commands();
         CommandHelper myCommandHelper = new CommandHelper();
         Unit myQueen = findQueen(units);
+        if (turnNumber == 1) {
+            Player.origin = new Located();
+            Player.origin.abscisse = myQueen.abscisse;
+            Player.origin.ordonnee = myQueen.ordonnee;
+        }
         System.err.println("MyQueen : " + myQueen);
         SiteComposition mySiteComposition = new SiteComposition(sites, Site::isMine);
         System.err.println("MysiteComposition : " + mySiteComposition.sites);
         SiteComposition enemySiteComposition = new SiteComposition(sites, Site::isEnemys);
+        ArmyComposition enemyArmyComposition = new ArmyComposition(units, Unit::isEnemys);
 
         //
-        if (mySiteComposition.sites.size() < 7) {
-            basicBuildingStrategy(commands, myCommandHelper, gold, touchingSite, sites, myQueen, mySiteComposition);
+        if (mySiteComposition.sites.size() < 6) {
+            basicBuildingStrategy(commands, myCommandHelper, touchingSite, sites, myQueen, mySiteComposition);
         } else {
-            adaptingBuildingStrategy(commands, myCommandHelper, gold, touchingSite, sites, units, myQueen, mySiteComposition, enemySiteComposition);
+            adaptingBuildingStrategy(commands, myCommandHelper, touchingSite, sites, units, myQueen, mySiteComposition, enemySiteComposition, enemyArmyComposition);
         }
 
         List<Site> productionReadySites = getProductionReadySites(sites);
         ArmyComposition myArmyComposition = new ArmyComposition(units, Unit::isMine);
-        ArmyComposition enemyArmyComposition = new ArmyComposition(units, Unit::isEnemys);
 
         spendGoldOnTraining(commands, myCommandHelper, sites, gold, productionReadySites, myArmyComposition, enemyArmyComposition, enemySiteComposition);
 
@@ -113,7 +125,6 @@ class Strategy {
 
     private void basicBuildingStrategy(Commands commands,
                                        CommandHelper myCommandHelper,
-                                       int gold,
                                        Site touchingSite,
                                        Sites sites,
                                        Unit myQueen,
@@ -122,10 +133,11 @@ class Strategy {
         if (touchingSite != null && touchingSite.isNotConstructed()) {
             siteId = touchingSite.siteId;
         } else {
-            Optional<Site> closestSite = getClosestNeutralSite(sites, myQueen);
+            Optional<Site> closestSite = sites.getClosestSafeNeutralSite(myQueen);
             siteId = closestSite.get().siteId;
         }
 
+        System.err.println("nbSites = " + mySiteComposition.sites.size());
         // construire dans l'ordre : barracks-knights, mine, mine, tower, tower
         switch (mySiteComposition.sites.size()) {
             case 0:
@@ -136,7 +148,7 @@ class Strategy {
                 break;
             case 2:
                 // is MineUpgraded ? build next mine : upgrade current mine
-                if (isMineEnoughUpgraded(touchingSite)) {
+                if (isGoldMineEnoughUpgraded(touchingSite)) {
                     commands.commandToInvoke1 = myCommandHelper.build(siteId, SiteType.MINE.name());
                 }
                 else {
@@ -144,13 +156,7 @@ class Strategy {
                 }
                 break;
             case 3:
-                // is MineUpgraded ? build next barracks : upgrade current mine
-                if(isMineEnoughUpgraded(touchingSite)) {
-                    commands.commandToInvoke1 = myCommandHelper.build(siteId, UnitsType.KNIGHT.mappingToSite.get());
-                }
-                else {
-                    commands.commandToInvoke1 = myCommandHelper.build(touchingSite.siteId, SiteType.MINE.name());
-                }
+                commands.commandToInvoke1 = myCommandHelper.build(siteId, SiteType.TOWER.name());
                 break;
             case 4:
                 commands.commandToInvoke1 = myCommandHelper.build(siteId, SiteType.TOWER.name());
@@ -162,39 +168,139 @@ class Strategy {
                 commands.commandToInvoke1 = myCommandHelper.build(siteId, UnitsType.GIANT.mappingToSite.get());
                 break;
             default:
-                commands.commandToInvoke1 = CommandType.WAIT.name();
+                siteId = sites.findClosestUpgradableTower(myQueen).map(site -> site.siteId).orElse(-1);
+                if (siteId != -1) {
+                    commands.commandToInvoke1 = myCommandHelper.build(siteId, SiteType.TOWER.name());
+                }
+                else {
+                    commands.commandToInvoke1 = CommandType.WAIT.name();
+                }
         }
     }
 
-    private boolean isMineEnoughUpgraded(Site touchingSite) {
+    private boolean isGoldMineEnoughUpgraded(Site touchingSite) {
         return touchingSite == null || touchingSite.param1 >= touchingSite.ignore2;
     }
 
-    private void adaptingBuildingStrategy(Commands commands, CommandHelper myCommandHelper,
-                                          int gold, Site touchingSite, Sites sites,
+    private void adaptingBuildingStrategy(Commands commands, CommandHelper myCommandHelper, Site touchingSite, Sites sites,
                                           Units units, Unit myQueen, SiteComposition mySiteComposition,
-                                          SiteComposition enemySiteComposition) {
-        int remainingGold = gold;
+                                          SiteComposition enemySiteComposition, ArmyComposition enemyArmy) {
+        System.err.println("adapting");
+
         // What should i build next
-        String buildingType = computeNextBuildingType(sites);
-        if (siteCanBeBuilt(touchingSite)) {
-            commands.commandToInvoke1 = myCommandHelper.build(touchingSite.siteId, buildingType);
-        } else {
-            Optional<Site> closestSite = getClosestNeutralSite(sites, myQueen);
-            if (closestSite.isPresent()) {
-                commands.commandToInvoke1 = computeMoveCommand(myCommandHelper, myQueen, closestSite.get());
-            } else {
-                commands.commandToInvoke1 = CommandType.WAIT.toString();
+        int siteDestinationId = -1;
+        // if queen in range of enemy turret, go to origin
+        if (sites.isInRangeOfEnemyTurrets(myQueen)) {
+            System.err.println("should go to safety");
+            siteDestinationId = 0;
+            commands.commandToInvoke1 = myCommandHelper.moveToPosition(Player.origin.abscisse, Player.origin.ordonnee);
+        }
+
+        // if queen in range of knight, go to closest tower
+        if (units.isInRangeOfEnemyKnigths(myQueen)) {
+            System.err.println("going under turrer protection && upgrade");
+            siteDestinationId = sites.findClosestUpgradableTower(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, SiteType.TOWER.name());
             }
         }
+
+        // si nb mines < 2
+        if (siteDestinationId == -1 && mySiteComposition.nbMines < 2) {
+            System.err.println("should building mines");
+            Optional<Site> mineToUp = sites.findClosestSafeGoldMineToBuild(myQueen);
+            siteDestinationId = mineToUp.map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                Site destination = sites.get(siteDestinationId);
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, SiteType.MINE.name());
+            }
+        }
+        // 2 barracks knight / 1 archer / 1 giants
+        if (siteDestinationId == -1 && mySiteComposition.nbKnightBarracks < 2) {
+            System.err.println("should building knight barracks");
+            siteDestinationId = sites.getClosestSafeNeutralSite(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, UnitsType.KNIGHT.mappingToSite.get());
+            }
+        }
+        if (siteDestinationId == -1 && mySiteComposition.nbArcherBarracks < 1) {
+            System.err.println("should building archer barracks");
+            siteDestinationId = sites.getClosestSafeNeutralSite(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, UnitsType.ARCHER.mappingToSite.get());
+            }
+        }
+        if (siteDestinationId == -1 && mySiteComposition.nbGiantBarracks < 1) {
+            System.err.println("should building giant barracks");
+            siteDestinationId = sites.getClosestSafeNeutralSite(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, UnitsType.GIANT.mappingToSite.get());
+            }
+        }
+        int myIncome = mySiteComposition.income();
+        int hisIncome = enemySiteComposition.income();
+        System.err.println("incomes : " + myIncome + " " + hisIncome);
+        if (siteDestinationId == -1 && myIncome < hisIncome) {
+            // find an upgradable mine close or neutral close
+            System.err.println("should increase income");
+            siteDestinationId = sites.findClosestSafeUpgradableMine(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, SiteType.MINE.name());
+            }
+        }
+        // Si enemy proches -> Tower
+        if (siteDestinationId == -1 && mySiteComposition.nbTowers < mySiteComposition.nbMines + 1) {
+            // find an upgradable tower close or neutral close
+            System.err.println("should build tower");
+            siteDestinationId = sites.findClosestUpgradableTower(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, SiteType.TOWER.name());
+            }
+        }
+
+        // amélioration des mines existantes
+        if (siteDestinationId == -1) {
+            System.err.println("should upgrade existing mines");
+            siteDestinationId = sites.findClosestSafeUpgradableMine(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, SiteType.MINE.name());
+            }
+        }
+
+        // Crée des nouvelles mines
+        if (siteDestinationId == -1) {
+            System.err.println("should build more mines");
+            siteDestinationId = sites.findClosestSafeGoldMineToBuild(myQueen).map(site -> site.siteId).orElse(-1);
+            if (siteDestinationId != -1) {
+                commands.commandToInvoke1 = myCommandHelper.build(siteDestinationId, SiteType.MINE.name());
+            }
+        }
+
+
+
+        if (siteDestinationId == -1) {
+            commands.commandToInvoke1 = CommandType.WAIT.toString();
+        }
+
+//        String buildingType = computeNextBuildingType(sites);
+//        if (siteCanBeBuilt(touchingSite)) {
+//            commands.commandToInvoke1 = myCommandHelper.build(touchingSite.siteId, buildingType);
+//        } else {
+//            Optional<Site> closestSite = sites.getClosestSafeNeutralSite(myQueen);
+//            if (closestSite.isPresent()) {
+//                commands.commandToInvoke1 = computeMoveCommand(myCommandHelper, myQueen, closestSite.get());
+//            } else {
+//                commands.commandToInvoke1 = CommandType.WAIT.toString();
+//            }
+//        }
     }
 
-    private int canProduceUnitType(List<Site> productionReadySites, UnitsType unitsType) {
+    public int canProduceUnitType(List<Site> productionReadySites, UnitsType unitsType) {
         Optional<Site> productionSite = productionReadySites.stream().filter(site -> site.canBuild(unitsType)).findFirst();
         return productionSite.map(site -> site.siteId).orElse(-1);
     }
 
-    private void spendGoldOnTraining(Commands commands, CommandHelper myCommandHelper,
+    public void spendGoldOnTraining(Commands commands, CommandHelper myCommandHelper,
                                      Sites sites, int remainingGold, List<Site> productionReadySites,
                                      ArmyComposition myArmyComposition, ArmyComposition enemyArmyComposition,
                                      SiteComposition enemySiteComposition) {
@@ -202,32 +308,42 @@ class Strategy {
         int i = 0;
 
         int goldToEconomize = 0;
+        System.err.println("remainingGold = " + remainingGold);
+        System.err.println("enemyArmy = " + enemyArmyComposition);
 
-        // si enemy tower > 5 -> giants
         // si knight > 8 -> archers
-        // sinon knights
-        if (enemySiteComposition.nbTowers > Player.TOWER_THRESOLD && canAffordGiant(remainingGold)) {
-            goldToEconomize = Player.GIANT_COST;
-            int buildingId = canProduceUnitType(productionReadySites, UnitsType.GIANT);
-            if (buildingId != -1) {
-                ids.add(buildingId);
-                remainingGold -= Player.GIANT_COST;
-                goldToEconomize -= Player.GIANT_COST;
-            }
-        }
-
-        if (enemyArmyComposition.nbKnights > Player.KNIGHT_THRESOLD && canAffordArcher(remainingGold)) {
-            goldToEconomize = Player.ARCHER_COST;
-            int buildingId = canProduceUnitType(productionReadySites, UnitsType.ARCHER);
-            if (buildingId != -1) {
-                ids.add(buildingId);
-                remainingGold -= Player.ARCHER_COST;
+        if (enemyArmyComposition.nbKnights >= Player.KNIGHT_THRESOLD ) {
+            System.err.println("need Archers");
+            if (!canAffordArcher(remainingGold)) {
                 goldToEconomize = Player.ARCHER_COST;
             }
+            else {
+                int buildingId = canProduceUnitType(productionReadySites, UnitsType.ARCHER);
+                if (buildingId != -1) {
+                    ids.add(buildingId);
+                    remainingGold -= Player.ARCHER_COST;
+                }
+            }
+        }
+        // si enemy tower > 5 -> giants
+        if (enemySiteComposition.nbTowers > Player.TOWER_THRESOLD ) {
+            System.err.println("need Giants");
+            if (!canAffordGiant(remainingGold)) {
+                goldToEconomize = Player.GIANT_COST;
+            }
+            else {
+                int buildingId = canProduceUnitType(productionReadySites, UnitsType.GIANT);
+                if (buildingId != -1) {
+                    ids.add(buildingId);
+                    remainingGold -= Player.GIANT_COST;
+                }
+            }
         }
 
+        // sinon knights
         int knightBuildingId = canProduceUnitType(productionReadySites, UnitsType.KNIGHT);
-        while ((remainingGold - Player.KNIGHT_COST > goldToEconomize) && remainingGold > Player.KNIGHT_COST && knightBuildingId != -1) {
+        if ((remainingGold - Player.KNIGHT_COST > goldToEconomize) && remainingGold > Player.KNIGHT_COST && knightBuildingId != -1) {
+            System.err.println("need Knights");
             ids.add(knightBuildingId);
             remainingGold -= Player.KNIGHT_COST;
 
@@ -253,7 +369,7 @@ class Strategy {
     }
 
     private String computeMoveCommand(CommandHelper myCommandHelper, Unit myQueen, Site closestSite) {
-        return myCommandHelper.moveTowardSite(myQueen, closestSite);
+        return myCommandHelper.moveTowardSite(closestSite);
     }
 
     private UnitsType computeNextBarrackType(long nbKnightsBarracks, long nbArchersBarracks) {
@@ -337,19 +453,6 @@ class Strategy {
     private long countArchersBarracks(List<Site> mySites) {
         return mySites.stream().filter(Site::isArchersBarracks).count();
     }
-
-    private Optional<Site> getClosestNeutralSite(Sites allSites, Unit myQueen) {
-        List<Site> neutralSites = allSites.values().stream().filter(Site::isNotConstructed).collect(Collectors.toList());
-        if (neutralSites != null && !neutralSites.isEmpty()) {
-            neutralSites.sort(
-                    Comparator.comparing(site -> site.distanceToUnit(myQueen))
-            );
-            if (neutralSites.get(0) != null) {
-                return Optional.of(neutralSites.get(0));
-            }
-        }
-        return Optional.empty();
-    }
 }
 
 class Possession {
@@ -368,10 +471,18 @@ class Possession {
     }
 }
 
-class Site extends Possession {
-    int siteId;
+class Located extends Possession {
     int abscisse;
     int ordonnee;
+    public Double distanceToUnit(Located unit) {
+        return Math.sqrt(
+                Math.pow(unit.abscisse - abscisse, 2) + Math.pow(unit.ordonnee - ordonnee, 2)
+        );
+    }
+}
+
+class Site extends Located {
+    int siteId;
     int radius;
     int structureType;
     int param1;
@@ -414,10 +525,8 @@ class Site extends Possession {
         return structureType == 1;
     }
 
-    public Double distanceToUnit(Unit unit) {
-        return Math.sqrt(
-                Math.pow(unit.abscisse - abscisse, 2) + Math.pow(unit.ordonnee - ordonnee, 2)
-        );
+    public boolean isGoldMine()  {
+        return structureType == 0;
     }
 
     public boolean isArchersBarracks() {
@@ -438,6 +547,16 @@ class Site extends Possession {
 
     public boolean canBuild(UnitsType unitsType) {
         return isBarracks() && param2 == unitsType.barrackType;
+    }
+
+    public boolean isGoldMineUpgradable() {
+        return isGoldMine() && ignore2 > param1;
+    }
+
+    public boolean inRange(Located unit) {
+        // (x - abs)² + ( y -ord)² <= R²
+        // Only for turrets
+        return isTower() && distanceToUnit(unit) <= param2;
     }
 }
 
@@ -485,7 +604,7 @@ class SiteComposition {
         nbTowers = sites.stream().filter(Site::isTower).count();
         nbGiantBarracks = sites.stream().filter(Site::isGiantsBarracks).count();
         nbArcherBarracks = sites.stream().filter(Site::isArchersBarracks).count();
-        nbMines = sites.stream().filter(Site::isMine).count();
+        nbMines = sites.stream().filter(Site::isGoldMine).count();
     }
 
     public String basicStrategyNextBuilding() {
@@ -506,6 +625,16 @@ class SiteComposition {
                 return UnitsType.GIANT.mappingToSite.get();
         }
         return "";
+    }
+
+    public int income() {
+        int income = 0;
+
+        List<Site> goldmines = sites.stream().filter(Site::isGoldMine).collect(Collectors.toList());
+        for (Site site : goldmines) {
+            income += site.param1;
+        }
+        return income;
     }
 }
 
@@ -530,20 +659,69 @@ class ArmyComposition {
                 ", nbGiants=" + nbGiants +
                 '}';
     }
+
+    public long computeNbKnightCloseToUnit(Unit unit) {
+        return armyUnits.stream().filter(Unit::isKnight).filter(knight -> knight.distanceToUnit(unit) <= Player.DISTANCE_THRESOLD).count();
+    }
 }
 
 class Sites extends HashMap<Integer, Site> {
+    public Optional<Site> findClosestUpgradableTower(Unit unit) {
+        return this.values().
+                stream().filter(site -> site.isNotConstructed() || (site.isMine() && site.isTower())).
+                filter(tower -> tower.param1 < Player.TOWER_MAX_HP - Player.QUEEN_TOWER_REPAIR_HP).
+                sorted(Comparator.comparing(site -> site.distanceToUnit(unit))).findFirst();
+
+//            List<Site> towers = this.values().stream().filter(Site::isMine).filter(Site::isTower).collect(Collectors.toList());
+//
+//            towers = towers.stream().filter(tower -> tower.param1 < Player.TOWER_MAX_HP - Player.QUEEN_TOWER_REPAIR_HP).collect(Collectors.toList());
+//            towers.sort(Comparator.comparing(site -> site.distanceToUnit(unit)));
+//
+//            return Optional.of(towers.get(0));
+    }
+
+    public Optional<Site> findClosestSafeUpgradableMine(Unit unit) {
+        return this.values().
+                stream().filter(Site::isGoldMineUpgradable).
+                filter(mine -> mine.param1 < mine.ignore2).
+                filter(mine -> !isInRangeOfEnemyTurrets(mine)).
+                sorted(Comparator.comparing(site -> site.distanceToUnit(unit))).findFirst();
+    }
+
+    public Optional<Site> findClosestSafeGoldMineToBuild(Unit myQueen) {
+        return this.values().stream().
+                filter(mine -> mine.isGoldMineUpgradable() || mine.isNotConstructed()).
+                filter(mine -> !isInRangeOfEnemyTurrets(mine)).
+                sorted(Comparator.comparing(site -> site.distanceToUnit(myQueen))).findFirst();
+    }
+
+    public Optional<Site> getClosestSafeNeutralSite(Unit myQueen) {
+        return this.values().stream().
+                filter(Site::isNotConstructed).
+                filter(site -> !isInRangeOfEnemyTurrets(site)).
+                sorted(Comparator.comparing(site -> site.distanceToUnit(myQueen))).
+                findFirst();
+    }
+
+    public boolean isInRangeOfEnemyTurrets(Located unit) {
+        return this.values().stream().filter(Site::isTower).
+                filter(Site::isEnemys).
+                anyMatch(site -> site.inRange(unit));
+    }
 }
 
 class Units extends ArrayList<Unit> {
     Units(int numUnits) {
         super(numUnits);
     }
+
+    public boolean isInRangeOfEnemyKnigths(Located unit) {
+        return this.stream().filter(unit1 -> unit1.isEnemys() && unit1.isKnight()).
+                anyMatch(knight -> knight.distanceToUnit(unit) <= Player.QUEEN_AGRESSION_TRIGGER);
+    }
 }
 
-class Unit extends Possession {
-    int abscisse;
-    int ordonnee;
+class Unit extends Located {
     int unitType;
     int health;
 
@@ -605,7 +783,7 @@ class CommandHelper {
     String train(List<Integer> ids) {
         StringBuilder base = new StringBuilder(CommandType.TRAIN.toString());
         for (int id : ids) {
-            if (id > 0) {
+            if (id >= 0) {
                 base.append(Player.SPACE).append(id);
             }
         }
@@ -620,8 +798,12 @@ class CommandHelper {
         return CommandType.BUILD.toString() + Player.SPACE + siteId + Player.SPACE + buildingType;
     }
 
-    String moveTowardSite(Unit myqueen, Site site) {
+    String moveTowardSite(Site site) {
         return CommandType.MOVE + Player.SPACE + site.abscisse + Player.SPACE + site.ordonnee;
+    }
+
+    String moveToPosition(int abscisse, int ordonnee) {
+        return CommandType.MOVE + Player.SPACE + abscisse + Player.SPACE + ordonnee;
     }
 }
 
